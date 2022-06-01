@@ -19,24 +19,22 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/actions-runner-controller/actions-runner-controller/api/v1alpha1"
+	"github.com/actions-runner-controller/actions-runner-controller/github"
 	"github.com/actions-runner-controller/actions-runner-controller/hash"
 	"github.com/go-logr/logr"
-
+	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/actions-runner-controller/actions-runner-controller/api/v1alpha1"
-	"github.com/actions-runner-controller/actions-runner-controller/github"
 )
 
 const (
@@ -51,7 +49,6 @@ const (
 	EnvVarRepo       = "RUNNER_REPO"
 	EnvVarEnterprise = "RUNNER_ENTERPRISE"
 	EnvVarEphemeral  = "RUNNER_EPHEMERAL"
-	EnvVarTrue       = "true"
 )
 
 // RunnerReconciler reconciles a Runner object
@@ -59,7 +56,7 @@ type RunnerReconciler struct {
 	client.Client
 	Log                         logr.Logger
 	Recorder                    record.EventRecorder
-	Scheme                      *runtime.Scheme
+	Scheme                      *k8sruntime.Scheme
 	GitHubClient                *github.Client
 	RunnerImage                 string
 	RunnerImagePullSecrets      []string
@@ -528,11 +525,11 @@ func mutatePod(pod *corev1.Pod, token string) *corev1.Pod {
 
 func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.RunnerConfig, defaultRunnerImage string, defaultRunnerImagePullSecrets []string, defaultDockerImage, defaultDockerRegistryMirror string, githubBaseURL string) (corev1.Pod, error) {
 	var (
-		privileged                bool = true
-		dockerdInRunner           bool = runnerSpec.DockerdWithinRunnerContainer != nil && *runnerSpec.DockerdWithinRunnerContainer
-		dockerEnabled             bool = runnerSpec.DockerEnabled == nil || *runnerSpec.DockerEnabled
-		ephemeral                 bool = runnerSpec.Ephemeral == nil || *runnerSpec.Ephemeral
-		dockerdInRunnerPrivileged bool = dockerdInRunner
+		privileged                = true
+		dockerdInRunner           = runnerSpec.DockerdWithinRunnerContainer != nil && *runnerSpec.DockerdWithinRunnerContainer
+		dockerEnabled             = runnerSpec.DockerEnabled == nil || *runnerSpec.DockerEnabled
+		ephemeral                 = runnerSpec.Ephemeral == nil || *runnerSpec.Ephemeral
+		dockerdInRunnerPrivileged = dockerdInRunner
 	)
 
 	template = *template.DeepCopy()
@@ -601,7 +598,7 @@ func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.Ru
 	var seLinuxOptions *corev1.SELinuxOptions
 	if template.Spec.SecurityContext != nil {
 		seLinuxOptions = template.Spec.SecurityContext.SELinuxOptions
-		if seLinuxOptions != nil {
+		if seLinuxOptions != nil && runtime.GOOS != "windows" {
 			privileged = false
 			dockerdInRunnerPrivileged = false
 		}
@@ -621,15 +618,20 @@ func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.Ru
 		}
 	}
 
+	container := &corev1.Container{
+		Name: containerName,
+	}
+
+	if runtime.GOOS != "windows" {
+		container.SecurityContext = &corev1.SecurityContext{
+			// Runner need to run privileged if it contains DinD
+			Privileged: &dockerdInRunnerPrivileged,
+		}
+	}
+
 	if runnerContainer == nil {
 		runnerContainerIndex = -1
-		runnerContainer = &corev1.Container{
-			Name: containerName,
-			SecurityContext: &corev1.SecurityContext{
-				// Runner need to run privileged if it contains DinD
-				Privileged: &dockerdInRunnerPrivileged,
-			},
-		}
+		runnerContainer = container
 	}
 
 	if dockerdContainer == nil {
@@ -656,7 +658,7 @@ func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.Ru
 		runnerContainer.SecurityContext = &corev1.SecurityContext{}
 	}
 
-	if runnerContainer.SecurityContext.Privileged == nil {
+	if runnerContainer.SecurityContext.Privileged == nil && runtime.GOOS != "windows" {
 		// Runner need to run privileged if it contains DinD
 		runnerContainer.SecurityContext.Privileged = &dockerdInRunnerPrivileged
 	}
@@ -823,7 +825,7 @@ func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.Ru
 			Value: "/certs",
 		})
 
-		if dockerdContainer.SecurityContext == nil {
+		if dockerdContainer.SecurityContext == nil && runtime.GOOS != "windows" {
 			dockerdContainer.SecurityContext = &corev1.SecurityContext{
 				Privileged:     &privileged,
 				SELinuxOptions: seLinuxOptions,
@@ -907,7 +909,7 @@ func addFinalizer(finalizers []string, finalizerName string) ([]string, bool) {
 
 func removeFinalizer(finalizers []string, finalizerName string) ([]string, bool) {
 	removed := false
-	result := []string{}
+	var result []string
 
 	for _, name := range finalizers {
 		if name == finalizerName {

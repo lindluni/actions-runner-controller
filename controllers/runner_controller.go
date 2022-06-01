@@ -19,7 +19,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 
@@ -595,10 +594,18 @@ func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.Ru
 		},
 	}
 
+	windows := false
+	for _, toleration := range template.Spec.Tolerations {
+		if toleration.Key == "windows" {
+			windows = true
+			break
+		}
+	}
+
 	var seLinuxOptions *corev1.SELinuxOptions
 	if template.Spec.SecurityContext != nil {
 		seLinuxOptions = template.Spec.SecurityContext.SELinuxOptions
-		if seLinuxOptions != nil && runtime.GOOS != "windows" {
+		if seLinuxOptions != nil && !windows {
 			privileged = false
 			dockerdInRunnerPrivileged = false
 		}
@@ -622,7 +629,7 @@ func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.Ru
 		Name: containerName,
 	}
 
-	if runtime.GOOS != "windows" {
+	if !windows {
 		container.SecurityContext = &corev1.SecurityContext{
 			// Runner need to run privileged if it contains DinD
 			Privileged: &dockerdInRunnerPrivileged,
@@ -658,7 +665,7 @@ func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.Ru
 		runnerContainer.SecurityContext = &corev1.SecurityContext{}
 	}
 
-	if runnerContainer.SecurityContext.Privileged == nil && runtime.GOOS != "windows" {
+	if runnerContainer.SecurityContext.Privileged == nil && !windows {
 		// Runner need to run privileged if it contains DinD
 		runnerContainer.SecurityContext.Privileged = &dockerdInRunnerPrivileged
 	}
@@ -825,7 +832,7 @@ func newRunnerPod(runnerName string, template corev1.Pod, runnerSpec v1alpha1.Ru
 			Value: "/certs",
 		})
 
-		if dockerdContainer.SecurityContext == nil && runtime.GOOS != "windows" {
+		if dockerdContainer.SecurityContext == nil && !windows {
 			dockerdContainer.SecurityContext = &corev1.SecurityContext{
 				Privileged:     &privileged,
 				SELinuxOptions: seLinuxOptions,
